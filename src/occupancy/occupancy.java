@@ -14,15 +14,23 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
 
+import javax.naming.InitialContext;
 import javax.net.ssl.SSLContext;
 
+import org.omg.CORBA.PUBLIC_MEMBER;
+
 import com.mysql.cj.LicenseConfiguration;
+import com.mysql.cj.xdevapi.ColumnDefinition.StaticColumnDefinition;
 
 public class occupancy {
 	public static final String URL = "jdbc:mysql://sensoria-mysql.ics.uci.edu:3306/tippersdb_restored?autoReconnect=true&useSSL=false&user=tippersUser&password=tippers2018";
 
 	public static Connection connection;
 	public static ResultSet rs;
+	
+	final static int LengthOfLearnedData = 10;
+	public static String queryTime;
+	public static String queryRoom;
 	
 	static class Devices{
 		String userId;
@@ -67,40 +75,72 @@ public class occupancy {
 	
 	public static List<Devices> devices = new ArrayList<>();
 	public static List<String> RegisteredDevice = new ArrayList<>();
-	public static List<Users> userS = new ArrayList<>();
+	public static List<Users> userS = new ArrayList<>();//store unregistered devices
 	public static List<TransformedUsers> userST = new ArrayList<>();
+	public static List<SimilarityValue> Sim = new ArrayList<>();
 	public static int day_th;
-	final public static Double eps = 0.2;
+	final public static Double eps = 0.01;
+	public static Double ExpectedOccupance;
+	public static int RegisteredDevices;
 	
 	public static void main( String[] args ) {
 		try {
 			 Class.forName("com.mysql.cj.jdbc.Driver");
 			 connection = DriverManager.getConnection(URL);
 			 System.out.println("Successful connected!");
+			 RegisteredDevices=0;
+			 ExpectedOccupance=0.0;
 			 
-			 //System.out.println(CreateQuery(3, "2019-01-10 11:00:00", "2019-01-10 20:10:00", "2059","195836"));
-			 ReadQuery(3, "2019-01-10 11:00:00", "2019-01-10 11:10:00", "2059","195836");
-			 ReadQuery(3, "2019-01-10 11:00:00", "2019-01-10 11:10:00", "2059","220853");
-			 //Test(2);
+			 Init();
+			 //read candidate devices
+			 ReadQuery(1, queryTime, "", queryRoom, "");
+			 //filter registered devices
+			 ReadQuery(2, "", "", "", "");
+			 CountExpectedOccupance();
+			 System.out.println("# of connected devices: "+devices.size());
+			 //learn similarity for each unregistered device
+			 for(int i=0;i<devices.size();i++) {
+				 if(!RegisteredDevice.contains(devices.get(i).userId)) {// not registered
+					 ReadQuery(3, queryTime, "", "", devices.get(i).userId);
+				 }
+				 else {
+					 RegisteredDevices ++;
+				 }
+			 }
+			
 			 TransformData();
-			 //Test(3);
-			 System.out.println(Similarity(0, 1));
+			 //Test(4);
+			 ER();
+			 System.out.println("# of users: "+ExpectedOccupance);
+			 
 			 connection.close();
 			} 
 			catch (ClassNotFoundException e) { e.printStackTrace(); } 
 			catch(SQLException e) { e.printStackTrace(); }
 	}
 	
+	public static void Init() {
+		queryTime = "2019-01-10 11:00:00";
+		queryRoom = "2099";
+	}
+	
+	public static void CountExpectedOccupance() {
+		for(int i=0;i<devices.size();i++) {
+			ExpectedOccupance += devices.get(i).confidence;
+		}
+	}
+	
 	public static String CreateQuery(int queryType, String startTimestamp, String endTimestamp, String location, String userId) {
 		String sql = "";
 		if (queryType == 1) {//search presence table to find candidate devices 
 			StringBuilder query = new StringBuilder();
-			String startTimeR=AddDate(1,startTimestamp,5);
+			String startTimeR=AddDate(1,startTimestamp,3);
+			String endTimeTemp = AddDate(1, startTimestamp, 5);
 			query.append("select  userID, confidence\n" + 
 					"from PRESENCE\n" + 
 					"where PRESENCE.startTimestamp >=").append("'"+startTimestamp+"'").append(
 					" and PRESENCE.startTimestamp<=").append("'"+startTimeR+"'").append(" and PRESENCE.location=").append(
-					"'"+location+"'").append(" and PRESENCE.endTimestamp<=").append("'"+endTimestamp+"'"); 
+					"'"+location+"'").append(" and PRESENCE.endTimestamp<=").append("'"+endTimeTemp+"'"); 
 			sql = query.toString();
 		}
 		else if(queryType == 2) {//read registered devices
@@ -153,11 +193,11 @@ public class occupancy {
 		else if(queryType==3) {//read one month day for one user not test
 			Users users = new Users();
 			users.userId = userId;
-			for(int i=0;i<10;i++) {//read one user
+			for(int i=0;i<LengthOfLearnedData;i++) {//read one user
 				Oneday oneday = new Oneday();
 				//System.out.println("** "+oneday.moments.size());
 				String startTime = AddDate(3, TransformEarly(startTimestamp), -i);
-				String endTime = AddDate(3, TransformLate(endTimestamp), -i);
+				String endTime = AddDate(3, TransformLate(startTimestamp), -i);
 				String sql = CreateQuery(queryType, startTime, endTime, location, userId);
 				//System.out.println(sql);
 				try {//read one day
@@ -240,17 +280,18 @@ public class occupancy {
 		return value;
 	}
 	
-	public static int ER() {
+	public static void ER() {
 		int entityNum = 0;
 		for(int i=0;i<userS.size();i++) {
+			SimilarityValue similarityValue = new SimilarityValue();
 			for(int j=i+1;j<userS.size();j++) {
-				if(Similarity(i, j)>eps) {
-					entityNum++;
-				}
+				similarityValue.similarity.add(Similarity(i, j));
 			}
+			Sim.add(similarityValue);
 		}
-		return userS.size()-entityNum;
+		ExpectedOccupance = Math.ceil(ExpectedOccupance);
 	}
+	
 	
 	public static void TransformData() {//transform data: discrete 
 		for(int id=0;id<userS.size();id++) {//for each user
@@ -377,6 +418,14 @@ public class occupancy {
 							System.out.println(userST.get(i).user.get(j).moments.get(k).location.get(p) + " " + userST.get(i).user.get(j).moments.get(k).confidence.get(p));
 						}
 					}
+				}
+			}
+		}
+		if(type==4) {
+			System.out.println(userS.size());
+			for(int i=0;i<userS.size();i++) {
+				for(int j=i+1;j<userS.size();j++) {
+					System.out.println(Similarity(i, j));
 				}
 			}
 		}
